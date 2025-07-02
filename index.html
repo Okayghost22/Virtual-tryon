@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Glasses Try-On</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .container {
+            position: relative;
+            display: inline-block;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        
+        #videoElement {
+            display: block;
+            width: 640px;
+            height: 480px;
+            transform: scaleX(-1); /* Mirror the video */
+        }
+        
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+            transform: scaleX(-1); /* Mirror the canvas to match video */
+        }
+        
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        
+        button {
+            padding: 10px 20px;
+            background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 25px;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s;
+        }
+        
+        button:hover {
+            transform: scale(1.05);
+        }
+        
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        input[type="range"] {
+            width: 100px;
+        }
+        
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 5px;
+            text-align: center;
+        }
+        
+        h1 {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🕶️ AR Glasses Try-On</h1>
+    
+    <div class="status" id="status">Click "Start Camera" to begin</div>
+    
+    <div class="controls">
+        <button onclick="startCamera()">Start Camera</button>
+        <button onclick="stopCamera()">Stop Camera</button>
+        
+        <div class="slider-container">
+            <label>Size:</label>
+            <input type="range" id="sizeSlider" min="0.8" max="1.5" step="0.1" value="1.0" onchange="updateGlassesSize()">
+            <span id="sizeValue">1.0</span>
+        </div>
+        
+        <div class="slider-container">
+            <label>Position:</label>
+            <input type="range" id="positionSlider" min="-20" max="20" step="2" value="0" onchange="updateGlassesPosition()">
+            <span id="positionValue">0</span>
+        </div>
+    </div>
+    
+    <div class="container">
+        <video id="videoElement" autoplay muted playsinline></video>
+        <canvas id="overlayCanvas" width="640" height="480"></canvas>
+    </div>
+
+    <script>
+        let faceMesh;
+        let camera;
+        let isRunning = false;
+        let glassesSize = 1.0;
+        let glassesYOffset = 0;
+        
+        const videoElement = document.getElementById('videoElement');
+        const canvas = document.getElementById('overlayCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        
+        // Load glasses image
+        const glassesImg = new Image();
+        glassesImg.src = 'data:image/svg+xml;base64,' + btoa(`
+            <svg width="200" height="80" xmlns="http://www.w3.org/2000/svg">
+                <!-- Left lens -->
+                <ellipse cx="50" cy="40" rx="35" ry="25" fill="rgba(0,100,255,0.3)" stroke="#333" stroke-width="3"/>
+                <!-- Right lens -->
+                <ellipse cx="150" cy="40" rx="35" ry="25" fill="rgba(255,50,50,0.3)" stroke="#333" stroke-width="3"/>
+                <!-- Bridge -->
+                <rect x="85" y="37" width="30" height="6" fill="#333" rx="3"/>
+                <!-- Left arm -->
+                <rect x="15" y="37" width="35" height="4" fill="#333" rx="2"/>
+                <!-- Right arm -->
+                <rect x="150" y="37" width="35" height="4" fill="#333" rx="2"/>
+            </svg>
+        `);
+        
+        async function initializeFaceMesh() {
+            faceMesh = new FaceMesh({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+                }
+            });
+            
+            faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.5
+            });
+            
+            faceMesh.onResults(onResults);
+            console.log('FaceMesh initialized');
+        }
+        
+        function onResults(results) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                const landmarks = results.multiFaceLandmarks[0];
+                drawGlasses(landmarks);
+                statusDiv.textContent = '✅ Face detected - Glasses active';
+                statusDiv.style.background = 'rgba(0,255,0,0.2)';
+            } else {
+                statusDiv.textContent = '👤 Looking for face...';
+                statusDiv.style.background = 'rgba(255,255,0,0.2)';
+            }
+        }
+        
+        function drawGlasses(landmarks) {
+            // Key facial landmarks for glasses positioning
+            const noseBridge = landmarks[6];     // Top of nose bridge
+            const leftEyeInner = landmarks[133]; // Inner corner of left eye
+            const rightEyeInner = landmarks[362]; // Inner corner of right eye
+            const leftEyeOuter = landmarks[33];   // Outer corner of left eye
+            const rightEyeOuter = landmarks[263]; // Outer corner of right eye
+            
+            // Calculate glasses position and dimensions
+            const leftEyeX = leftEyeInner.x * canvas.width;
+            const leftEyeY = leftEyeInner.y * canvas.height;
+            const rightEyeX = rightEyeInner.x * canvas.width;
+            const rightEyeY = rightEyeInner.y * canvas.height;
+            
+            // Center point between eyes
+            const centerX = (leftEyeX + rightEyeX) / 2;
+            const centerY = (leftEyeY + rightEyeY) / 2 + glassesYOffset;
+            
+            // Calculate eye distance for scaling
+            const eyeDistance = Math.hypot(rightEyeX - leftEyeX, rightEyeY - leftEyeY);
+            
+            // Calculate rotation angle based on eye alignment
+            const angle = Math.atan2(rightEyeY - leftEyeY, rightEyeX - leftEyeX);
+            
+            // Glasses dimensions (scaled based on face size)
+            const glassesWidth = eyeDistance * 2.2 * glassesSize;
+            const glassesHeight = glassesWidth * 0.4;
+            
+            // Draw glasses with proper transformation
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate(angle);
+            
+            // Add subtle shadow for depth
+            ctx.shadowColor = 'rgba(0,0,0,0.3)';
+            ctx.shadowBlur = 3;
+            ctx.shadowOffsetX = 2;
+            ctx.shadowOffsetY = 2;
+            
+            ctx.drawImage(
+                glassesImg,
+                -glassesWidth / 2,
+                -glassesHeight / 2,
+                glassesWidth,
+                glassesHeight
+            );
+            
+            ctx.restore();
+        }
+        
+        async function startCamera() {
+            try {
+                statusDiv.textContent = '📷 Starting camera...';
+                statusDiv.style.background = 'rgba(255,255,0,0.2)';
+                
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: 640,
+                        height: 480,
+                        facingMode: 'user'
+                    }
+                });
+                
+                videoElement.srcObject = stream;
+                
+                if (!faceMesh) {
+                    await initializeFaceMesh();
+                }
+                
+                isRunning = true;
+                processFrame();
+                
+                statusDiv.textContent = '✅ Camera started - Looking for face...';
+                
+            } catch (error) {
+                console.error('Error accessing camera:', error);
+                statusDiv.textContent = '❌ Camera access denied';
+                statusDiv.style.background = 'rgba(255,0,0,0.2)';
+            }
+        }
+        
+        function stopCamera() {
+            isRunning = false;
+            if (videoElement.srcObject) {
+                videoElement.srcObject.getTracks().forEach(track => track.stop());
+                videoElement.srcObject = null;
+            }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            statusDiv.textContent = 'Camera stopped';
+            statusDiv.style.background = 'rgba(255,255,255,0.1)';
+        }
+        
+        async function processFrame() {
+            if (!isRunning) return;
+            
+            if (videoElement.readyState >= 2) {
+                await faceMesh.send({ image: videoElement });
+            }
+            
+            requestAnimationFrame(processFrame);
+        }
+        
+        function updateGlassesSize() {
+            const slider = document.getElementById('sizeSlider');
+            const valueSpan = document.getElementById('sizeValue');
+            glassesSize = parseFloat(slider.value);
+            valueSpan.textContent = glassesSize.toFixed(1);
+        }
+        
+        function updateGlassesPosition() {
+            const slider = document.getElementById('positionSlider');
+            const valueSpan = document.getElementById('positionValue');
+            glassesYOffset = parseInt(slider.value);
+            valueSpan.textContent = glassesYOffset;
+        }
+        
+        // Initialize on page load
+        window.addEventListener('load', () => {
+            console.log('Page loaded, ready to start camera');
+        });
+    </script>
+</body>
+</html>
